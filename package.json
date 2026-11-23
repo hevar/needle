@@ -1,0 +1,33 @@
+{
+  "name": "needle",
+  "version": "1.0.0",
+  "description": "Find text across your vault: ranked results with file paths and a live, highlighted preview.",
+  "main": "main.js",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit && node esbuild.config.mjs production",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "check": "npm run lint && npm test && npm run build",
+    "version": "node version-bump.mjs && git add manifest.json versions.json"
+  },
+  "keywords": [
+    "obsidian",
+    "search",
+    "find"
+  ],
+  "author": "h3",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.39.5",
+    "eslint-plugin-obsidianmd": "^0.6.0",
+    "obsidian": "^1.14.4",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.2",
+    "vitest": "^5.1.0"
+  }
+}

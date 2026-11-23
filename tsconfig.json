@@ -1,0 +1,20 @@
+{
+	"compilerOptions": {
+		"baseUrl": ".",
+		"inlineSourceMap": true,
+		"inlineSources": true,
+		"module": "ESNext",
+		"target": "ES2021",
+		"moduleResolution": "bundler",
+		"isolatedModules": true,
+		"strict": true,
+		"noImplicitAny": true,
+		"noImplicitOverride": false,
+		"noUncheckedIndexedAccess": true,
+		"noFallthroughCasesInSwitch": true,
+		"skipLibCheck": true,
+		"types": [],
+		"lib": ["DOM", "DOM.Iterable", "ES2021"]
+	},
+	"include": ["src/**/*.ts", "tests/**/*.ts"]
+}

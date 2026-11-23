@@ -1,0 +1,9 @@
+{
+	"id": "needle",
+	"name": "Needle",
+	"version": "1.0.0",
+	"minAppVersion": "1.13.0",
+	"description": "Find text across your vault, with ranked results, clear note paths and a live preview of every match.",
+	"author": "h3",
+	"isDesktopOnly": false
+}
