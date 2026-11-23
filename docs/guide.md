@@ -98,7 +98,7 @@ Search options, sort order, preview mode and window size are remembered between 
 
 ## Cloud-synced vaults
 
-Some sync tools keep notes only in the cloud until you open them, such as iCloud with **Optimize Mac Storage** or OneDrive Files On-Demand. Needle searches the notes on your device right away and downloads the rest in the background, two at a time so Obsidian stays responsive. Results update as they arrive, and the header shows how many notes are left.
+Some sync tools keep notes only in the cloud until you open them, such as iCloud with **Optimize Mac Storage** or OneDrive Files On-Demand. Needle reads notes two at a time so Obsidian stays responsive. When a note takes longer than usual, which usually means it's being downloaded, Needle shows the results it already has and loads the rest in the background. Results update as notes arrive, and the header shows how many are left.
 
 To avoid the wait on a Mac, right-click the vault folder in Finder and choose **Keep Downloaded**.
 
@@ -114,7 +114,7 @@ To avoid the wait on a Mac, right-click the vault folder in Finder and choose **
 
 **A note is missing from the results.** Check **Excluded folders** in Needle's settings and **Files and links → Excluded files** in Obsidian's. Needle only searches Markdown notes, and skips notes over 10 MB.
 
-**The results say more notes are downloading.** Your sync tool is fetching notes that are stored only in the cloud. See [Cloud-synced vaults](#cloud-synced-vaults).
+**The results say notes are still loading.** Your sync tool is probably fetching notes that are stored only in the cloud. See [Cloud-synced vaults](#cloud-synced-vaults).
 
 **My regex was stopped.** Patterns with nested repeats, like `(a+)+$`, can take extremely long to run. Try a more specific pattern.
 

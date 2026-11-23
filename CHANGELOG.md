@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.1
+
+- Detect cloud-only notes by how long they take to load, without using Node.js APIs
+- Keep searches responsive on mobile when notes are still downloading
+
 ## 1.0.0
 
 First public release.

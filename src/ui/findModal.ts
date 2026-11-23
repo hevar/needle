@@ -135,7 +135,7 @@ export class FindModal extends Modal {
 			}
 			this.setSummary(done < total ? `Indexing notes… ${done.toLocaleString()} of ${total.toLocaleString()}` : "");
 		};
-		this.plugin.index.onDownloadProgress = (pending) => this.onDownloadProgress(pending);
+		this.plugin.index.onBackgroundProgress = (pending) => this.onBackgroundProgress(pending);
 		if (this.initialQuery.length > 0) {
 			void this.runSearch();
 		} else {
@@ -152,7 +152,7 @@ export class FindModal extends Modal {
 			activeWindow.cancelAnimationFrame(this.previewFrame);
 		}
 		this.plugin.index.onIndexProgress = null;
-		this.plugin.index.onDownloadProgress = null;
+		this.plugin.index.onBackgroundProgress = null;
 		this.plugin.lastQuery = this.inputEl.value;
 		this.plugin.index.release();
 		this.preview.destroy();
@@ -611,9 +611,9 @@ export class FindModal extends Modal {
 		}
 	}
 
-	private onDownloadProgress(pending: number): void {
+	private onBackgroundProgress(pending: number): void {
 		if (this.response === null) {
-			this.setSummary(this.downloadStatus());
+			this.setSummary(this.backgroundStatus());
 			return;
 		}
 		if (pending > 0) {
@@ -630,7 +630,7 @@ export class FindModal extends Modal {
 			previous !== null &&
 			previous.totalMatches === response.totalMatches &&
 			previous.totalFiles === response.totalFiles;
-		if (unchanged && this.plugin.index.pendingDownloads > 0) {
+		if (unchanged && this.plugin.index.pendingNotes > 0) {
 			this.setSummary(this.resultSummary(previous));
 			return;
 		}
@@ -649,9 +649,9 @@ export class FindModal extends Modal {
 		this.rows[this.selected]?.el.scrollIntoView({ block: "nearest" });
 	}
 
-	private downloadStatus(): string {
-		const pending = this.plugin.index.pendingDownloads;
-		return pending > 0 ? `${formatCount(pending, "note")} still downloading` : "";
+	private backgroundStatus(): string {
+		const pending = this.plugin.index.pendingNotes;
+		return pending > 0 ? `${formatCount(pending, "note")} still loading` : "";
 	}
 
 	private resultSummary(response: SearchResponse): string {
@@ -659,14 +659,14 @@ export class FindModal extends Modal {
 			response.files.length === 0
 				? "No matches"
 				: `${formatCount(response.totalMatches, "match", "matches")} in ${formatCount(response.totalFiles, "note")}`;
-		const downloads = this.downloadStatus();
-		return downloads === "" ? found : `${found} · ${downloads}`;
+		const loading = this.backgroundStatus();
+		return loading === "" ? found : `${found} · ${loading}`;
 	}
 
 	private renderIdle(): void {
 		this.response = null;
 		this.renderedQuery = "";
-		this.setSummary(this.downloadStatus());
+		this.setSummary(this.backgroundStatus());
 		const alt = Platform.isMacOS ? "⌥" : "Alt+";
 		this.renderMessage(
 			this.folder === "" ? "Search every note in your vault" : `Search the notes in ${this.folder}`,
@@ -789,8 +789,8 @@ export class FindModal extends Modal {
 	}
 
 	private noMatchHint(): string {
-		if (this.plugin.index.pendingDownloads > 0) {
-			return "Some notes are still downloading, so matches in them can still appear.";
+		if (this.plugin.index.pendingNotes > 0) {
+			return "Some notes are still loading, so matches in them can still appear.";
 		}
 		const tips: string[] = [];
 		if (this.options.matchCase) {

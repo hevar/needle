@@ -1,15 +1,18 @@
-import { FileSystemAdapter, Platform, normalizePath, type App, type TFile } from "obsidian";
+import { normalizePath, type App, type TFile } from "obsidian";
 import { createBackend, type ProgressListener, type SearchBackend } from "./backends";
 import type { DocInput, SearchRequest, SearchResponse } from "./types";
 
-const READ_BATCH = 64;
+const UPSERT_BATCH = 64;
 /**
  * Reading a note that only exists in the cloud (iCloud with "Optimize Mac
  * Storage", OneDrive Files On-Demand) downloads it first, which takes about a
  * second and holds one of the few threads Obsidian uses for all file access.
- * Two at a time keeps the rest of Obsidian responsive.
+ * Two at a time keeps the rest of Obsidian responsive, and notes on disk load
+ * just as fast as with more.
  */
-const DOWNLOAD_CONCURRENCY = 2;
+const READ_CONCURRENCY = 2;
+/** Notes on disk take a few milliseconds, so a read this slow is most likely a download. */
+const SLOW_READ_MS = 150;
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const IDLE_RELEASE_MS = 15 * 60 * 1000;
 
@@ -42,19 +45,24 @@ export const exclusionTest = (app: App, settings: IndexSettings): ((path: string
  * Keeps the search backend in step with the vault. Before every search it
  * compares each note's modification time with what was indexed and only reads
  * what changed, so there are no event listeners to keep alive between searches.
- * Notes that have to be downloaded first are fetched in the background, so a
- * search never waits for them. The index is released after a period without
- * use to give the memory back.
+ * A search waits for those reads until one turns out slow. The remaining notes
+ * then load in the background, so a search never waits for downloads. The
+ * index is released after a period without use to give the memory back.
  */
 export class VaultIndex {
 	onIndexProgress: ProgressListener | null = null;
-	onDownloadProgress: ((pending: number) => void) | null = null;
+	onBackgroundProgress: ((pending: number) => void) | null = null;
 	private backend: SearchBackend | null = null;
 	private preferWorker = true;
 	private readonly indexed = new Map<string, number>();
-	private readonly downloadQueue = new Map<string, TFile>();
-	private readonly downloading = new Set<string>();
-	private downloaders = 0;
+	private readonly queue = new Map<string, TFile>();
+	private readonly reading = new Set<string>();
+	private unsent: DocInput[] = [];
+	private readers = 0;
+	private inBackground = false;
+	private indexDone = 0;
+	private indexTotal = 0;
+	private stopWaiting: (() => void) | null = null;
 	private syncing: Promise<void> | null = null;
 	private releaseTimer: number | null = null;
 
@@ -63,8 +71,8 @@ export class VaultIndex {
 		private readonly settings: () => IndexSettings,
 	) {}
 
-	get pendingDownloads(): number {
-		return this.downloadQueue.size + this.downloading.size;
+	get pendingNotes(): number {
+		return this.inBackground ? this.queue.size + this.reading.size : 0;
 	}
 
 	async sync(): Promise<void> {
@@ -106,8 +114,7 @@ export class VaultIndex {
 		this.backend?.dispose();
 		this.backend = null;
 		this.indexed.clear();
-		this.downloadQueue.clear();
-		this.downloading.clear();
+		this.clearQueue();
 	}
 
 	private async ensureBackend(): Promise<SearchBackend> {
@@ -115,12 +122,24 @@ export class VaultIndex {
 			return this.backend;
 		}
 		this.indexed.clear();
-		this.downloadQueue.clear();
-		this.downloading.clear();
+		this.clearQueue();
 		const { backend, isWorker } = await createBackend(this.preferWorker);
 		this.preferWorker = isWorker;
 		this.backend = backend;
 		return backend;
+	}
+
+	private clearQueue(): void {
+		this.queue.clear();
+		this.reading.clear();
+		this.unsent = [];
+		this.inBackground = false;
+		this.finishWaiting();
+	}
+
+	private finishWaiting(): void {
+		this.stopWaiting?.();
+		this.stopWaiting = null;
 	}
 
 	private async reconcile(): Promise<void> {
@@ -130,14 +149,14 @@ export class VaultIndex {
 		const stale: TFile[] = [];
 		for (const file of files) {
 			seen.add(file.path);
-			const waiting = this.downloadQueue.has(file.path) || this.downloading.has(file.path);
+			const waiting = this.queue.has(file.path) || this.reading.has(file.path);
 			if (!waiting && this.indexed.get(file.path) !== file.stat.mtime) {
 				stale.push(file);
 			}
 		}
-		for (const path of this.downloadQueue.keys()) {
+		for (const path of this.queue.keys()) {
 			if (!seen.has(path)) {
-				this.downloadQueue.delete(path);
+				this.queue.delete(path);
 			}
 		}
 		const removed = Array.from(this.indexed.keys()).filter((path) => !seen.has(path));
@@ -148,91 +167,109 @@ export class VaultIndex {
 			}
 		}
 
-		const remote = await this.findCloudOnly(stale);
-		const local = stale.filter((file) => !remote.has(file.path));
-		if (local.length > 0) {
-			this.onIndexProgress?.(0, local.length);
-		}
-		for (let start = 0; start < local.length; start += READ_BATCH) {
-			const batch = local.slice(start, start + READ_BATCH);
-			const docs = (await Promise.all(batch.map((file) => this.read(file)))).filter(
-				(doc): doc is DocInput => doc !== null,
-			);
-			if (this.backend !== backend || !backend.alive) {
-				return;
+		if (stale.length > 0) {
+			// Sync clients evict what has not been touched for a while, so recent notes are likely on disk.
+			stale.sort((a, b) => b.stat.mtime - a.stat.mtime);
+			const queued = [...stale, ...this.queue.values()];
+			this.queue.clear();
+			for (const file of queued) {
+				this.queue.set(file.path, file);
 			}
-			backend.upsert(docs);
-			for (const doc of docs) {
-				this.indexed.set(doc.path, doc.mtime);
+			if (!this.inBackground) {
+				this.indexDone = 0;
+				this.indexTotal = this.queue.size + this.reading.size;
+				this.onIndexProgress?.(0, this.indexTotal);
 			}
-			this.onIndexProgress?.(Math.min(start + READ_BATCH, local.length), local.length);
 		}
-
-		if (this.backend !== backend || !backend.alive) {
+		const idle = Math.min(READ_CONCURRENCY - this.readers, this.queue.size);
+		for (let started = 0; started < idle; started++) {
+			void this.readQueued();
+		}
+		if (this.inBackground || this.queue.size + this.reading.size === 0) {
 			return;
 		}
-		if (remote.size > 0) {
-			for (const file of stale) {
-				if (remote.has(file.path)) {
-					this.downloadQueue.set(file.path, file);
-				}
-			}
-			this.onDownloadProgress?.(this.pendingDownloads);
-		}
-		const idle = Math.min(DOWNLOAD_CONCURRENCY - this.downloaders, this.downloadQueue.size);
-		for (let started = 0; started < idle; started++) {
-			void this.download(backend);
-		}
+		await new Promise<void>((resolve) => {
+			this.stopWaiting = resolve;
+		});
 	}
 
-	private async download(backend: SearchBackend): Promise<void> {
-		this.downloaders++;
+	private async readQueued(): Promise<void> {
+		this.readers++;
 		try {
-			for (const [path, file] of this.downloadQueue) {
-				if (this.backend !== backend || !backend.alive) {
-					return;
-				}
-				this.downloadQueue.delete(path);
-				this.downloading.add(path);
+			for (let file = this.nextQueued(); file !== null; file = this.nextQueued()) {
+				this.reading.add(file.path);
+				const slowTimer = window.setTimeout(() => this.moveToBackground(), SLOW_READ_MS);
 				const doc = await this.read(file);
-				if (this.backend !== backend || !backend.alive) {
-					return;
-				}
-				this.downloading.delete(path);
+				window.clearTimeout(slowTimer);
+				this.reading.delete(file.path);
 				if (doc !== null) {
-					backend.upsert([doc]);
-					this.indexed.set(doc.path, doc.mtime);
+					this.unsent.push(doc);
 				}
-				this.onDownloadProgress?.(this.pendingDownloads);
+				this.afterRead();
 			}
 		} finally {
-			this.downloaders--;
+			this.readers--;
+			if (this.readers === 0) {
+				this.finishWaiting();
+			}
 		}
 	}
 
-	/**
-	 * Notes evicted by a cloud sync client still report their size, but no
-	 * disk blocks back them until they are downloaded again.
-	 */
-	private async findCloudOnly(files: TFile[]): Promise<Set<string>> {
-		const adapter = this.app.vault.adapter;
-		if (files.length === 0 || !Platform.isDesktopApp || Platform.isMobile || !(adapter instanceof FileSystemAdapter)) {
-			return new Set();
+	private nextQueued(): TFile | null {
+		if (!this.backend?.alive) {
+			return null;
 		}
-		try {
-			const { stat } = require("fs/promises") as typeof import("fs/promises");
-			const base = adapter.getBasePath();
-			const flags = await Promise.all(
-				files.map((file) =>
-					stat(`${base}/${file.path}`).then(
-						(stats) => stats.blocks === 0 && stats.size > 0,
-						() => false,
-					),
-				),
-			);
-			return new Set(files.filter((_, index) => flags[index]).map((file) => file.path));
-		} catch {
-			return new Set();
+		const next = this.queue.values().next();
+		if (next.done) {
+			return null;
+		}
+		this.queue.delete(next.value.path);
+		return next.value;
+	}
+
+	private afterRead(): void {
+		const drained = this.queue.size === 0 && this.reading.size === 0;
+		if (this.inBackground || drained || this.unsent.length >= UPSERT_BATCH) {
+			this.flush();
+		}
+		if (this.inBackground) {
+			if (drained) {
+				this.inBackground = false;
+			}
+			this.onBackgroundProgress?.(this.pendingNotes);
+			return;
+		}
+		this.indexDone++;
+		if (drained || this.indexDone % UPSERT_BATCH === 0) {
+			this.onIndexProgress?.(this.indexDone, this.indexTotal);
+		}
+		if (drained) {
+			this.finishWaiting();
+		}
+	}
+
+	private moveToBackground(): void {
+		if (this.inBackground || this.queue.size + this.reading.size === 0) {
+			return;
+		}
+		this.inBackground = true;
+		this.flush();
+		this.onBackgroundProgress?.(this.pendingNotes);
+		this.finishWaiting();
+	}
+
+	private flush(): void {
+		if (this.unsent.length === 0) {
+			return;
+		}
+		const docs = this.unsent;
+		this.unsent = [];
+		if (!this.backend?.alive) {
+			return;
+		}
+		this.backend.upsert(docs);
+		for (const doc of docs) {
+			this.indexed.set(doc.path, doc.mtime);
 		}
 	}
 
